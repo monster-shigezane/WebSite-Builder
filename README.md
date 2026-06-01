@@ -1,6 +1,6 @@
 # Sitemap & Website Builder 🎨🤖
 
-A production-grade, full-stack marketing platform designed for creative directors and marketing teams. The studio lets users input campaign criteria, target segments, and desired brand tones to automatically forge high-leverage matching campaign concepts, multi-channel copy variants, launch checklists, and custom DALL-E 3 aesthetic visuals.
+Full-stack campaign and website structure workspace utilizing OpenAI and Gemini API for site blueprints, HTML/CSS templates, SEO metric simulations, and launch checklists.
 
 Built with **React (Vite, Tailwind CSS, Motion)** on the client, and **Express (Node.js)** on the server, leveraging OpenAI's structured **Responses API** and **DALL-E 3**.
 
