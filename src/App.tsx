@@ -1,4 +1,4 @@
-import { useState, FormEvent, useRef, useId, useMemo } from "react";
+import { useState, FormEvent, useRef, useId, useMemo, useEffect } from "react";
 import JSZip from "jszip";
 import {
   Sparkles,
@@ -29,9 +29,29 @@ import {
   Share2,
   Upload,
   Download,
-  FolderArchive
+  FolderArchive,
+  Cloud,
+  Mail,
+  FileText,
+  Pin,
+  Plus,
+  LogOut,
+  FolderClosed
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import {
+  initAuth,
+  googleSignIn,
+  getCachedAccessToken,
+  setCachedAccessToken,
+  logout
+} from "./lib/firebaseAuth";
+import {
+  createDriveFolder,
+  uploadFileToDrive,
+  createGoogleDoc,
+  sendGmailCampaign
+} from "./lib/googleWorkspace";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -134,8 +154,82 @@ export default function App() {
   const [websiteData, setWebsiteData] = useState<WebsiteData | null>(null);
 
   // Active Tab navigation
-  const [activeTab, setActiveTab] = useState<"blueprints" | "styling" | "seo" | "simulator" | "milestones" | "images" | "marketing">("blueprints");
+  const [activeTab, setActiveTab] = useState<"blueprints" | "styling" | "seo" | "simulator" | "milestones" | "images" | "marketing" | "workspace">("blueprints");
   const [selectedBlueprintIndex, setSelectedBlueprintIndex] = useState(0);
+
+  // Google Workspace & Firebase Auth states
+  const [googleUser, setGoogleUser] = useState<any>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [authNeedsTrigger, setAuthNeedsTrigger] = useState(false);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [isGoogleLoggingIn, setIsGoogleLoggingIn] = useState(false);
+
+  // Drive state
+  const [driveExportProgress, setDriveExportProgress] = useState<"idle" | "running" | "success" | "error">("idle");
+  const [driveFolderId, setDriveFolderId] = useState<string | null>(null);
+  const [driveFolderUrl, setDriveFolderUrl] = useState<string | null>(null);
+  const [driveLogs, setDriveLogs] = useState<string[]>([]);
+
+  // Docs state
+  const [docsExportProgress, setDocsExportProgress] = useState<"idle" | "running" | "success" | "error">("idle");
+  const [docsUrl, setDocsUrl] = useState<string | null>(null);
+
+  // Gmail state
+  const [gmailProgress, setGmailProgress] = useState<"idle" | "running" | "success" | "error">("idle");
+  const [recipientEmail, setRecipientEmail] = useState("");
+  const [gmailSubject, setGmailSubject] = useState("");
+
+  // Keep state
+  const [keepNotes, setKeepNotes] = useState<{ id: string; title: string; content: string; color: string; pinned: boolean }[]>(() => {
+    try {
+      const stored = localStorage.getItem("concept_keep_notes");
+      return stored ? JSON.parse(stored) : [
+        {
+          id: "keep-1",
+          title: "🚀 Target SEO Strategy",
+          content: "Incorporate semantic high-performance descriptors to trigger higher conversion metrics in sitemap templates.",
+          color: "bg-amber-100",
+          pinned: true
+        },
+        {
+          id: "keep-2",
+          title: "🎨 Theme Palette Palette Design",
+          content: "Use custom CSS root variables for a unified design experience that makes styling fully dynamic.",
+          color: "bg-emerald-100",
+          pinned: false
+        }
+      ];
+    } catch {
+      return [];
+    }
+  });
+  const [newKeepTitle, setNewKeepTitle] = useState("");
+  const [newKeepContent, setNewKeepContent] = useState("");
+  const [newKeepColor, setNewKeepColor] = useState("bg-amber-100");
+
+  // Keep Notes Persistent Storage
+  useEffect(() => {
+    localStorage.setItem("concept_keep_notes", JSON.stringify(keepNotes));
+  }, [keepNotes]);
+
+  // Google Workspace Auth auto-initialization listener
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setGoogleToken(token);
+        setAuthNeedsTrigger(false);
+        setIsAuthChecking(false);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+        setAuthNeedsTrigger(true);
+        setIsAuthChecking(false);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
 
   // Marketing, Social Accounts and Custom Sharing State
   const [twitterHandle, setTwitterHandle] = useState(() => localStorage.getItem("marketing_twitter_handle") || "BrandPulse");
@@ -376,6 +470,268 @@ export default function App() {
       ...prev,
       [idx]: !prev[idx]
     }));
+  };
+
+  // Google Workspace auth event handlers
+  const handleGoogleLogin = async () => {
+    setIsGoogleLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setGoogleUser(result.user);
+        setGoogleToken(result.accessToken);
+        setAuthNeedsTrigger(false);
+        setRecipientEmail(result.user.email || "");
+      }
+    } catch (err: any) {
+      console.error("Sign in failed:", err);
+      alert(`Sign in failed: ${err?.message || err}`);
+    } finally {
+      setIsGoogleLoggingIn(false);
+    }
+  };
+
+  const handleGoogleLogout = async () => {
+    try {
+      await logout();
+      setGoogleUser(null);
+      setGoogleToken(null);
+      setAuthNeedsTrigger(true);
+      setDriveExportProgress("idle");
+      setDocsExportProgress("idle");
+      setGmailProgress("idle");
+    } catch (err) {
+      console.error("Logout failed:", err);
+    }
+  };
+
+  // Google Drive Save Action
+  const handleExportToDrive = async () => {
+    if (!websiteData) {
+      alert("No active website data available. Generate your website blueprints first.");
+      return;
+    }
+    const token = googleToken || getCachedAccessToken();
+    if (!token) {
+      alert("Please authenticate using 'Sign In with Google' first to link sessions.");
+      return;
+    }
+
+    const confirmExport = window.confirm(
+      `Do you want to export your website blueprints to Google Drive? \n\nThis will create a dedicated portfolio folder titled 'ConceptStudio - ${websiteData.website_name}' in your Drive index, and compile your generated HTML templates, CSS override definitions, and dynamic interaction scripts.`
+    );
+    if (!confirmExport) return;
+
+    setDriveExportProgress("running");
+    setDriveLogs(["Initializing Drive session token...", "Securing transmission connection..."]);
+
+    try {
+      const folderName = `ConceptStudio - ${websiteData.website_name}`;
+      setDriveLogs((prev) => [...prev, `Building directory path: "${folderName}"...`]);
+      const folderRes = await createDriveFolder(folderName, token);
+      setDriveFolderId(folderRes.id);
+      const folderUrl = `https://drive.google.com/drive/folders/${folderRes.id}`;
+      setDriveFolderUrl(folderUrl);
+      setDriveLogs((prev) => [...prev, `Folder initialized successfully (ID: ${folderRes.id})`]);
+
+      for (const page of websiteData.pages) {
+        const sanitizedName = page.file_name || `${page.page_name.toLowerCase().replace(/\s+/g, "-")}.html`;
+        setDriveLogs((prev) => [...prev, `Streaming custom template page "${sanitizedName}"...`]);
+        
+        const pageHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${page.page_name} | ${websiteData.website_name}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-50 text-slate-800">
+  ${page.html_template}
+  <script src="main.js"></script>
+</body>
+</html>`;
+
+        await uploadFileToDrive(folderRes.id, sanitizedName, pageHtml, "text/html", token);
+        setDriveLogs((prev) => [...prev, `✓ Generated file "${sanitizedName}" successfully written to Drive.`]);
+      }
+
+      setDriveLogs((prev) => [...prev, "Spawning visual styling definitions: style.css..."]);
+      const cssContent = `/* Custom Stylesheet overrides for ${websiteData.website_name} */
+${websiteData.styling.main_css || ""}`;
+      await uploadFileToDrive(folderRes.id, "style.css", cssContent, "text/css", token);
+      setDriveLogs((prev) => [...prev, "✓ CSS overrides structured and synced."]);
+
+      setDriveLogs((prev) => [...prev, "Compiling interactive javascript handlers: main.js..."]);
+      const jsContent = `/* Interactive Actions script for ${websiteData.website_name} */
+document.addEventListener('DOMContentLoaded', () => {
+  ${websiteData.main_js || ""}
+});`;
+      await uploadFileToDrive(folderRes.id, "main.js", jsContent, "application/javascript", token);
+      setDriveLogs((prev) => [...prev, "✓ Dynacore script successfully bundled."]);
+
+      setDriveLogs((prev) => [...prev, "🎉 Action Successful! Workspace archive uploaded to Google Drive."]);
+      setDriveExportProgress("success");
+    } catch (err: any) {
+      console.error("Drive upload occurred:", err);
+      setDriveLogs((prev) => [...prev, `⚠ Error during export: ${err?.message || err}`]);
+      setDriveExportProgress("error");
+    }
+  };
+
+  // Google Docs Save Action
+  const handleExportToDocs = async () => {
+    if (!websiteData) {
+      alert("Please generate website data first.");
+      return;
+    }
+    const token = googleToken || getCachedAccessToken();
+    if (!token) {
+      alert("Please authenticate using 'Sign In with Google' first.");
+      return;
+    }
+
+    const confirmDoc = window.confirm(
+      "Create a dynamic Strategy Brief document in Google Docs with meta specs, target SEO keyword matrices, and campaign content copy?"
+    );
+    if (!confirmDoc) return;
+
+    setDocsExportProgress("running");
+    try {
+      const docTitle = `Strategy Brief: ${websiteData.website_name}`;
+      const intro = `This document provides the sitemap design specs, brand typography outlines, and target copy profiles of "${websiteData.website_name}", generated via ConceptStudio Build.`;
+      
+      const siteName = websiteData.website_name || "New Site";
+      const keywordsList = targetKeywords || "business, seo, design";
+      const keyHash = keywordsList.split(",").slice(0, 3).map(k => "#" + k.trim().replace(/\s+/g, "")).join(" ");
+      const platform = deploymentPlatform || "Cloud Run";
+
+      const sections = [
+        {
+          title: "Sitemap Elements Index",
+          content: websiteData.pages.map(p => `- ${p.page_name} (${p.file_name})\n  SEO tags: ${p.alt_text_suggestions?.join(", ")}`).join("\n\n")
+        },
+        {
+          title: "Audience Target Keywords & Meta Profiles",
+          content: `Platform ingress deployment targets: ${websiteData.meta_info?.deployment_platform || "Staging Server"}\nTarget landing keywords: ${targetKeywords || "SEO content optimization"}`
+        },
+        {
+          title: "Brand Voice Specifications",
+          content: `Primary Accent HEX: ${websiteData.styling.theme_palette.primary}\nSecondary Accent HEX: ${websiteData.styling.theme_palette.secondary}\nBase CSS Theme: ${cssTheme}`
+        },
+        {
+          title: "Social Distribution Copies",
+          content: `Twitter/X Pitch:\n🔥 My latest launch ${siteName} is live! Speed & design dialed perfectly for ${keywordsList.split(",")[0]}. Powered by ${platform}! Check the sitemaps at once! ${keyHash} #buildinpublic\n\nLinkedIn Strategic Update:\n📈 I am pleased to share the comprehensive website layout and SEO sitemap blueprint for ${siteName}.\n\nOur architecture focuses heavily on organic search engine signals matching high-intent queries like "${keywordsList}" and is constructed for extreme-speed performance on ${platform}.\n\nFacebook Media Post:\n✨ It is happening! Check out our next-generation web blueprint for ${siteName}! ⚡ Formulated with awesome aesthetic color systems and target SEO optimization for key search words: ${keywordsList}! Ready to rock.`
+        }
+      ];
+
+      const res = await createGoogleDoc(docTitle, intro, sections, token);
+      setDocsUrl(res.url);
+      setDocsExportProgress("success");
+    } catch (err: any) {
+      console.error("Docs export error:", err);
+      alert(`Docs export failed: ${err?.message || err}`);
+      setDocsExportProgress("error");
+    }
+  };
+
+  // Gmail Campaign Send Action
+  const handleSendGmail = async () => {
+    if (!websiteData) {
+      alert("No active website data, generate first.");
+      return;
+    }
+    const token = googleToken || getCachedAccessToken();
+    if (!token) {
+      alert("Please login via Google Auth first.");
+      return;
+    }
+    if (!recipientEmail || !recipientEmail.includes("@")) {
+      alert("Please enter a valid recipient email address.");
+      return;
+    }
+
+    const confirmMail = window.confirm(
+      `Send campaign launch briefing to "${recipientEmail}" using your authenticated Gmail session? This will execute a live email transmission.`
+    );
+    if (!confirmMail) return;
+
+    setGmailProgress("running");
+    try {
+      const mailSubject = gmailSubject.trim() || `[ConceptStudio] Project launch Briefing - ${websiteData.website_name}`;
+      const mailHtml = `
+<div style="font-family: 'Segoe UI', -apple-system, sans-serif; background-color: #f8fafc; padding: 40px; color: #334155;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
+    <div style="background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%); padding: 32px 40px; color: #ffffff;">
+      <h1 style="margin: 0; font-size: 24px; font-weight: 800;">Launch Blueprint Loaded!</h1>
+      <p style="margin: 8px 0 0 0; color: #bfdbfe; font-size: 14px;">Campaign assets guide for <strong>${websiteData.website_name}</strong></p>
+    </div>
+    
+    <div style="padding: 40px;">
+      <h2 style="margin-top: 0; font-size: 18px; font-weight: bold; color: #1e293b;">Product Description</h2>
+      <p style="font-size: 14px; line-height: 1.6; color: #475569;">${websiteData.meta_info?.description || "High-performance digital components curated safely."}</p>
+      
+      <h3 style="margin-top: 24px; font-size: 15px; font-weight: bold; color: #1e293b;">Sitemap Files Structure</h3>
+      <table style="width: 100%; border-collapse: collapse; margin-top: 12px;">
+        <thead>
+          <tr style="background-color: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+            <th style="padding: 10px; text-align: left; font-size: 12px; color: #475569;">Page Target</th>
+            <th style="padding: 10px; text-align: left; font-size: 12px; color: #475569;">Filename</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${websiteData.pages.map(p => `
+            <tr style="border-bottom: 1px solid #f1f5f9;">
+              <td style="padding: 10px; font-size: 13px; font-weight: 600; color: #334155;">${p.page_name}</td>
+              <td style="padding: 10px; font-size: 13px; font-mono; color: #2563eb;">${p.file_name}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+
+      <div style="margin-top: 30px; padding: 20px; background-color: #eff6ff; border-radius: 12px; border: 1px solid #bfdbfe;">
+        <h4 style="margin: 0; font-size: 14px; color: #1e40af; font-weight: bold;">SEO Specific Tag Focus</h4>
+        <p style="margin: 8px 0 0 0; font-size: 13px; color: #1d4ed8; line-height: 1.5;">${targetKeywords || "SEO descriptors active."}</p>
+      </div>
+    </div>
+    
+    <div style="background-color: #f8fafc; padding: 20px 40px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 11px; color: #94a3b8;">
+      Generated secure sitemap campaign brief via Google Workspace credentials.
+    </div>
+  </div>
+</div>`;
+
+      await sendGmailCampaign(recipientEmail, mailSubject, mailHtml, token);
+      setGmailProgress("success");
+      alert("Gmail campaign sent successfully!");
+    } catch (err: any) {
+      console.error("Gmail transmission error:", err);
+      alert(`Gmail send failed: ${err?.message || err}`);
+      setGmailProgress("error");
+    }
+  };
+
+  // Google Keep local notes actions
+  const handleAddKeepNote = () => {
+    if (!newKeepContent.trim()) return;
+    const note = {
+      id: `keep-${Date.now()}`,
+      title: newKeepTitle.trim() || `Ideas - ${websiteData?.website_name || "Campaign"}`,
+      content: newKeepContent.trim(),
+      color: newKeepColor,
+      pinned: false
+    };
+    setKeepNotes((prev) => [note, ...prev]);
+    setNewKeepTitle("");
+    setNewKeepContent("");
+  };
+
+  const handleDeleteKeepNote = (id: string) => {
+    setKeepNotes((prev) => prev.filter(n => n.id !== id));
+  };
+
+  const handleTogglePinKeepNote = (id: string) => {
+    setKeepNotes((prev) => prev.map(n => n.id === id ? { ...n, pinned: !n.pinned } : n));
   };
 
   const handleDownloadZip = async () => {
@@ -1161,6 +1517,19 @@ python -m http.server 8000
                       >
                         <Share2 className="w-3.5 h-3.5 shrink-0" />
                         <span>Marketing Board</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab("workspace")}
+                        className={`flex-1 min-w-[124px] px-4 py-3 text-xs font-bold border-b-2 transition duration-200 flex items-center justify-center space-x-1 px-4 cursor-pointer ${
+                          activeTab === "workspace"
+                            ? "border-blue-600 text-blue-600 bg-slate-100/40"
+                            : "border-transparent text-slate-500 hover:text-slate-800"
+                        }`}
+                      >
+                        <Cloud className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                        <span>Workspace Hub</span>
                       </button>
                     </div>
 
@@ -2335,6 +2704,400 @@ python -m http.server 8000
 
                             </div>
                           </div>
+                        </motion.div>
+                      )}
+
+                      {/* TAB 8: Google Workspace Integration Hub */}
+                      {activeTab === "workspace" && (
+                        <motion.div
+                          key="tab-workspace"
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0 }}
+                          className="space-y-8"
+                        >
+                          <div className="border-b border-slate-100 pb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                            <div>
+                              <h3 className="text-sm font-extrabold text-slate-800 tracking-tight flex items-center">
+                                <Cloud className="w-4.5 h-4.5 text-blue-600 mr-2" />
+                                Google Workspace Integration Suite
+                              </h3>
+                              <p className="text-[11px] text-slate-500 font-sans mt-0.5">
+                                Save full blueprint folders to Drive, export structured briefs to Google Docs, and send campaign launch reviews via Gmail.
+                              </p>
+                            </div>
+
+                            {/* Connected User Badge / Status */}
+                            {googleUser && (
+                              <div className="flex items-center space-x-3 bg-slate-100/80 border border-slate-200 px-3 py-1.5 rounded-full shrink-0">
+                                {googleUser.photoURL ? (
+                                  <img
+                                    src={googleUser.photoURL}
+                                    alt="Google authorized user thumb"
+                                    referrerPolicy="no-referrer"
+                                    className="w-5.5 h-5.5 rounded-full border border-white"
+                                  />
+                                ) : (
+                                  <div className="w-5.5 h-5.5 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-[10px]">
+                                    {googleUser.displayName?.charAt(0) || "U"}
+                                  </div>
+                                )}
+                                <div className="text-left leading-none">
+                                  <span className="text-[10px] font-black text-slate-700 block truncate max-w-[120px]">
+                                    {googleUser.displayName || "Authorized Developer"}
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 font-mono block truncate max-w-[120px]">
+                                    {googleUser.email}
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={handleGoogleLogout}
+                                  title="Sign Out Session"
+                                  className="p-1 text-slate-400 hover:text-rose-600 transition cursor-pointer"
+                                >
+                                  <LogOut className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          {!googleUser ? (
+                            /* SIGN IN STATE PANEL */
+                            <div className="flex flex-col items-center justify-center p-12 text-center bg-slate-50 border border-slate-200 rounded-3xl space-y-6 max-w-xl mx-auto my-12 shadow-2xs">
+                              <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center border border-blue-100 shadow-3xs">
+                                <Cloud className="w-8 h-8 text-blue-500 animate-pulse" />
+                              </div>
+                              <div className="space-y-4">
+                                <h3 className="text-base font-black text-slate-800 tracking-tight">Sync Google Credentials</h3>
+                                <p className="text-xs text-slate-500 leading-relaxed max-w-sm font-sans">
+                                  Connect Google Drive, Google Docs, and Gmail with a single click. Save compiled blueprints, build strategy briefings, and transmit sitemap emails.
+                                </p>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={handleGoogleLogin}
+                                disabled={isGoogleLoggingIn}
+                                className={`px-6 py-3 cursor-pointer bg-white hover:bg-slate-50 border border-slate-300 hover:border-slate-400 text-slate-700 font-bold text-xs rounded-xl flex items-center justify-center space-x-3 transition shadow-3xs ${
+                                  isGoogleLoggingIn ? "opacity-60 cursor-not-allowed" : ""
+                                }`}
+                              >
+                                {isGoogleLoggingIn ? (
+                                  <>
+                                    <RefreshCw className="w-4 h-4 animate-spin text-slate-500" />
+                                    <span>Initiating Tunnel Session...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <svg className="w-4 h-4 shrink-0 shadow-3xs" viewBox="0 0 48 48">
+                                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                                      <path fill="#4285F4" d="M46.5 24c0-1.55-.15-3.24-.47-4.77H24v9.03h12.75c-.55 2.85-2.22 5.25-4.66 6.87l7.26 5.63c4.25-3.92 6.75-9.7 6.75-16.76z"/>
+                                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C1.03 16.51 0 20.14 0 24c0 3.86 1.03 7.49 2.56 10.78l7.97-6.19z"/>
+                                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.26-5.63c-2.03 1.36-4.64 2.19-8.63 2.19-6.26 0-11.57-4.22-13.46-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                                    </svg>
+                                    <span>Authenticate via Google OAuth</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          ) : (
+                            /* WORKSPACE DASHBOARD (3-way columns + Note Board) */
+                            <div className="space-y-8">
+                              
+                              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+                                
+                                {/* 1. GOOGLE DRIVE PORTFOLIO CARD */}
+                                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-4 flex flex-col justify-between h-full min-h-[350px]">
+                                  <div className="space-y-3">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded border border-emerald-200">
+                                        Drive v3 API
+                                      </span>
+                                      <FolderClosed className="w-4 h-4 text-emerald-600" />
+                                    </div>
+                                    <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider font-mono">
+                                      Google Drive Syncer
+                                    </h4>
+                                    <p className="text-[10px] text-slate-500 leading-relaxed font-sans">
+                                      Compiles sitemaps, templates, overrides stylesheet codes, and uploads them directly inside a dedicated Drive folder.
+                                    </p>
+
+                                    {/* Action Status Output log */}
+                                    {driveExportProgress !== "idle" && (
+                                      <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 h-28 overflow-y-auto font-mono text-[9px] text-indigo-400 leading-normal space-y-1 scrollbar-none">
+                                        {driveLogs.map((log, lIdx) => (
+                                          <div key={lIdx} className={log.startsWith("✓") ? "text-emerald-400" : log.startsWith("⚠") ? "text-rose-450" : "text-slate-300"}>
+                                            {log}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {driveFolderUrl && driveExportProgress === "success" && (
+                                      <a
+                                        href={driveFolderUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center space-x-1.5 text-[10px] text-emerald-600 font-bold hover:underline"
+                                      >
+                                        <ExternalLink className="w-3.5 h-3.5" />
+                                        <span>Open Drive Project Folder</span>
+                                      </a>
+                                    )}
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={handleExportToDrive}
+                                    disabled={driveExportProgress === "running" || !websiteData}
+                                    className={`w-full py-2.5 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center space-x-2 text-white shadow-3xs ${
+                                      driveExportProgress === "running"
+                                        ? "bg-slate-400 cursor-not-allowed"
+                                        : !websiteData
+                                        ? "bg-slate-300 text-slate-500 cursor-not-allowed"
+                                        : "bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white scale-100 hover:scale-[1.01]"
+                                    }`}
+                                  >
+                                    {driveExportProgress === "running" ? (
+                                      <>
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        <span>Exporting Files...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Cloud className="w-3.5 h-3.5" />
+                                        <span>Export Blueprint to Drive</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+
+                                {/* 2. GOOGLE DOCS STRATEGY DOC */}
+                                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-4 flex flex-col justify-between h-full min-h-[350px]">
+                                  <div className="space-y-3">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded border border-blue-200">
+                                        Docs v1 API
+                                      </span>
+                                      <FileText className="w-4 h-4 text-blue-600" />
+                                    </div>
+                                    <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider font-mono">
+                                      Strategy Brief Maker
+                                    </h4>
+                                    <p className="text-[10px] text-slate-500 leading-relaxed font-sans">
+                                      Generates a beautifully structured design Strategy Document in your Google Docs referencing sitemaps, active SEO descriptions, and social promotional copies.
+                                    </p>
+
+                                    {docsExportProgress === "success" && docsUrl && (
+                                      <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2">
+                                        <span className="text-[10px] text-emerald-800 font-bold block">✓ Document Created</span>
+                                        <a
+                                          href={docsUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center space-x-1 text-[10px] text-emerald-700 font-bold hover:underline"
+                                        >
+                                          <ExternalLink className="w-3.5 h-3.5" />
+                                          <span>Open Google Doc Strategy Brief</span>
+                                        </a>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={handleExportToDocs}
+                                    disabled={docsExportProgress === "running" || !websiteData}
+                                    className={`w-full py-2.5 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center space-x-2 text-white shadow-3xs ${
+                                      docsExportProgress === "running"
+                                        ? "bg-slate-400 cursor-not-allowed"
+                                        : !websiteData
+                                        ? "bg-slate-300 text-slate-400 cursor-not-allowed"
+                                        : "bg-blue-600 hover:bg-blue-700 active:scale-98 text-white scale-100 hover:scale-[1.01]"
+                                    }`}
+                                  >
+                                    {docsExportProgress === "running" ? (
+                                      <>
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        <span>Assembling Document...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <FileText className="w-3.5 h-3.5" />
+                                        <span>Create Brief in Google Docs</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+
+                                {/* 3. GMAIL DIGITAL LAUNCHPAD */}
+                                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-4 flex flex-col justify-between h-full min-h-[350px]">
+                                  <div className="space-y-3 text-left">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] bg-red-50 text-red-700 font-bold px-2 py-0.5 rounded border border-red-200">
+                                        Gmail v1 API
+                                      </span>
+                                      <Mail className="w-4 h-4 text-red-600" />
+                                    </div>
+                                    <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider font-mono">
+                                      Gmail Review Dispatcher
+                                    </h4>
+                                    <p className="text-[10px] text-slate-550 leading-relaxed font-sans mb-2">
+                                      Transmit details, sitemap specs, and keywords directly inside a rich layout review.
+                                    </p>
+
+                                    <div className="space-y-2 pt-0.5">
+                                      {/* Recipient Input */}
+                                      <div className="space-y-1">
+                                        <label htmlFor="gmail-to-input" className="text-[9px] font-bold text-slate-600">Recipient Email Address</label>
+                                        <input
+                                          id="gmail-to-input"
+                                          type="email"
+                                          value={recipientEmail}
+                                          onChange={(e) => setRecipientEmail(e.target.value)}
+                                          placeholder="recipient@example.com"
+                                          className="w-full text-[11px] p-2 bg-white border border-slate-200 rounded-lg focus:outline-hidden"
+                                        />
+                                      </div>
+
+                                      {/* Subject Input */}
+                                      <div className="space-y-1">
+                                        <label htmlFor="gmail-subject-input" className="text-[9px] font-bold text-slate-600">Email Subject Header</label>
+                                        <input
+                                          id="gmail-subject-input"
+                                          type="text"
+                                          value={gmailSubject}
+                                          onChange={(e) => setGmailSubject(e.target.value)}
+                                          placeholder={`Project launch specs: ${websiteData?.website_name || "Agency"}`}
+                                          className="w-full text-[11px] p-2 bg-white border border-slate-200 rounded-lg focus:outline-hidden"
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={handleSendGmail}
+                                    disabled={gmailProgress === "running" || !websiteData}
+                                    className={`w-full py-2.5 font-bold text-xs rounded-xl transition cursor-pointer flex items-center justify-center space-x-2 text-white shadow-3xs ${
+                                      gmailProgress === "running"
+                                        ? "bg-slate-400 cursor-not-allowed"
+                                        : !websiteData
+                                        ? "bg-slate-300 text-slate-500 cursor-not-allowed"
+                                        : "bg-red-600 hover:bg-red-700 active:scale-98 text-white scale-100 hover:scale-[1.01]"
+                                    }`}
+                                  >
+                                    {gmailProgress === "running" ? (
+                                      <>
+                                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        <span>Dispatching Mail...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Mail className="w-3.5 h-3.5" />
+                                        <span>Send Proposal Email</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+
+                              </div>
+
+                              {/* 4. GOOGLE KEEP COMPANION POST-IT BOARD */}
+                              <div className="bg-slate-50 border border-slate-200 p-5 rounded-2xl space-y-4">
+                                <div className="flex flex-col md:flex-row md:items-center md:justify-between border-b border-slate-200 pb-3 gap-2">
+                                  <div>
+                                    <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider font-mono flex items-center">
+                                      <Pin className="w-4 h-4 mr-1.5 text-amber-500" />
+                                      Google Keep Note Studio (Developer Sandbox)
+                                    </h4>
+                                    <p className="text-[10px] text-slate-500 leading-relaxed font-sans mt-0.5">
+                                      *Restrictions Fallback: The Google Keep REST API is G Suite Enterprise exclusive. Fulfill ideas locally with sticky widgets.
+                                    </p>
+                                  </div>
+
+                                  {/* Note Inputs Toolbar */}
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      placeholder="Idea Label Title..."
+                                      value={newKeepTitle}
+                                      onChange={(e) => setNewKeepTitle(e.target.value)}
+                                      className="text-[10px] p-2 bg-white border border-slate-200 rounded-lg focus:outline-hidden font-bold max-w-[130px]"
+                                    />
+                                    <input
+                                      type="text"
+                                      placeholder="Note description..."
+                                      value={newKeepContent}
+                                      onChange={(e) => setNewKeepContent(e.target.value)}
+                                      className="text-[10px] p-2 bg-white border border-slate-200 rounded-lg focus:outline-hidden max-w-[180px]"
+                                    />
+
+                                    {/* Color Dots */}
+                                    <div className="flex items-center space-x-1 mx-1.5 font-mono">
+                                      {["bg-amber-100", "bg-emerald-100", "bg-sky-100", "bg-fuchsia-100"].map((col) => (
+                                        <button
+                                          type="button"
+                                          key={col}
+                                          onClick={() => setNewKeepColor(col)}
+                                          className={`w-3.5 h-3.5 rounded-full border transition cursor-pointer ${col} ${
+                                            newKeepColor === col ? "border-slate-800 scale-110" : "border-slate-200"
+                                          }`}
+                                        />
+                                      ))}
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      onClick={handleAddKeepNote}
+                                      className="p-1.5 px-3 bg-amber-500 hover:bg-amber-600 font-bold text-[10px] text-white rounded-lg transition shrink-0 cursor-pointer"
+                                    >
+                                      Sticky Pin Note
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Pinned Grid */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 p-1">
+                                  {keepNotes.map((note) => (
+                                    <div
+                                      key={note.id}
+                                      className={`${note.color} border border-slate-200 shadow-3xs p-4 rounded-xl flex flex-col justify-between space-y-3 leading-relaxed relative hover:shadow-2xs transition`}
+                                    >
+                                      <div>
+                                        <div className="flex justify-between items-start">
+                                          <h5 className="text-[11px] font-extrabold text-slate-800 leading-snug tracking-tight">{note.title}</h5>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleTogglePinKeepNote(note.id)}
+                                            className={`text-[10px] transition cursor-pointer ${note.pinned ? "text-amber-600 scale-110" : "text-slate-400 hover:text-slate-600"}`}
+                                          >
+                                            📌
+                                          </button>
+                                        </div>
+                                        <p className="text-[10px] text-slate-700 leading-relaxed font-sans whitespace-pre-wrap mt-1">
+                                          {note.content}
+                                        </p>
+                                      </div>
+
+                                      <div className="flex justify-between items-center text-[8px] font-mono text-slate-500 pt-2 border-t border-slate-700/5 mt-2">
+                                        <span>LOCAL WORKSPACE NOTE</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteKeepNote(note.id)}
+                                          className="text-rose-600 hover:underline cursor-pointer"
+                                        >
+                                          Delete
+                                        </button>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+
+                            </div>
+                          )}
                         </motion.div>
                       )}
 
