@@ -1,4 +1,4 @@
-# Campaign Concept Studio 🎨🤖
+# Sitemap & Website Builder 🎨🤖
 
 A production-grade, full-stack marketing platform designed for creative directors and marketing teams. The studio lets users input campaign criteria, target segments, and desired brand tones to automatically forge high-leverage matching campaign concepts, multi-channel copy variants, launch checklists, and custom DALL-E 3 aesthetic visuals.
 
