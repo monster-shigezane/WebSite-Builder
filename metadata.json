@@ -1,0 +1,6 @@
+{
+  "name": "Campaign Concept Studio",
+  "description": "Full-stack campaign and website structure workspace utilizing OpenAI and Gemini API for site blueprints, HTML/CSS templates, SEO metric simulations, and launch checklists.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
